@@ -10,7 +10,8 @@
       "vaccines": [
         {
           "date": "2026-04-01",
-          "name": "新城疫"
+          "name": "新城疫",
+          "dueDate": ""
         }
       ],
       "transfers": [
