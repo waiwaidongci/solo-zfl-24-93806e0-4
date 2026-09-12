@@ -192,7 +192,7 @@ const page = `<!doctype html>
     async function api(path, options) {
       const res = await fetch(path, options && options.body ? { ...options, headers:{ "Content-Type":"application/json" } } : options);
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "请求失败");
+      if (!res.ok) throw new Error(data.message || data.error || "请求失败");
       return data;
     }
     function renderCards() {
@@ -223,7 +223,7 @@ const page = `<!doctype html>
       try {
         await api("/api/pigeons", { method:"POST", body: JSON.stringify(Object.fromEntries(new FormData(form).entries())) });
         form.reset(); msg.textContent = ""; await load();
-      } catch (e) { msg.textContent = e.message === "ring_exists" ? "该足环号已登记，不能重复建档" : e.message; }
+      } catch (e) { msg.textContent = e.message; }
     };
     load();
   </script>
@@ -288,7 +288,7 @@ const vaccinePage = `<!doctype html>
         <h2>鸽只疫苗详情</h2>
         <p class="meta">点击右侧列表中的任一条记录，查看该鸽的完整接种台账与到期提醒。</p>
       </div>
-      <h2 style="margin:16px 0 8px">接种记录</h2>
+      <h2 style="margin:16px 0 8px">接种记录 <span id="countLine" class="meta" style="font-size:13px;font-weight:400"></span></h2>
       <div class="panel" style="padding:0;overflow-x:auto">
         <table>
           <thead><tr><th>足环号</th><th>鸽主</th><th>疫苗</th><th>接种日期</th><th>下次到期日</th><th>状态</th><th>到期提醒</th></tr></thead>
@@ -301,6 +301,7 @@ const vaccinePage = `<!doctype html>
     const vaxForm = document.querySelector("#vaxForm");
     const filterForm = document.querySelector("#filterForm");
     const rows = document.querySelector("#rows");
+    const countLine = document.querySelector("#countLine");
     const detail = document.querySelector("#detail");
     const msg = document.querySelector("#vaxMsg");
     const ringSelect = document.querySelector("#ringSelect");
@@ -310,9 +311,15 @@ const vaccinePage = `<!doctype html>
     function todayStr(){ const d = new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
     function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\\\"":"&quot;","'":"&#39;"}[c])); }
     function todayUTC(){ const d = new Date(); return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()); }
-    function statusOf(v){
+    function baseUTC(){
+      const v = document.querySelector("#fAsOf").value;
+      if (v) { const t = Date.parse(v+"T00:00:00Z"); if (!Number.isNaN(t)) return t; }
+      return todayUTC();
+    }
+    function statusOf(v, base){
+      const ref = base === undefined ? baseUTC() : base;
       if (!v.dueDate) return "unknown";
-      const days = Math.round((Date.parse(v.dueDate+"T00:00:00Z") - todayUTC())/DAY);
+      const days = Math.round((Date.parse(v.dueDate+"T00:00:00Z") - ref)/DAY);
       if (days < 0) return "expired";
       if (days === 0) return "due_today";
       if (days <= 30) return "upcoming";
@@ -321,7 +328,7 @@ const vaccinePage = `<!doctype html>
     async function api(path, options) {
       const res = await fetch(path, options && options.body ? { ...options, headers:{ "Content-Type":"application/json" } } : options);
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "请求失败");
+      if (!res.ok) throw new Error(data.message || data.error || "请求失败");
       return data;
     }
     function renderRows(entries) {
@@ -334,31 +341,51 @@ const vaccinePage = `<!doctype html>
     async function query() {
       const params = new URLSearchParams(new FormData(filterForm));
       [...params.keys()].forEach(k => { if (!params.get(k)) params.delete(k); });
-      renderRows(await api("/api/vaccines?" + params.toString()));
+      try {
+        const data = await api("/api/vaccines?" + params.toString());
+        renderRows(data.entries);
+        countLine.textContent = "共 " + data.count + " 条（状态判定日：" + data.asOf + "）";
+      } catch (err) {
+        renderRows([]);
+        countLine.textContent = "";
+        rows.innerHTML = '<tr><td colspan="7" class="reminder expired">查询失败：'+esc(err.message)+'</td></tr>';
+      }
     }
     async function showDetail(ringNo) {
-      const data = await api('/api/pigeons/'+encodeURIComponent(ringNo)+'/vaccines');
+      try {
+        const data = await api('/api/pigeons/'+encodeURIComponent(ringNo)+'/vaccines');
+        renderDetail(data);
+      } catch (err) {
+        detail.innerHTML = '<h2>鸽只疫苗详情</h2><p class="msg err">'+esc(err.message)+'</p>';
+      }
+    }
+    function renderDetail(data) {
       const p = data.pigeon;
       const summary = data.summary;
+      const base = baseUTC();
+      const baseDateStr = new Date(base).toISOString().slice(0, 10);
+      const refVaccines = data.vaccines.map(v => ({ ...v, st: statusOf(v, base) }));
+      const overdue = refVaccines.filter(v => v.st === "expired").length;
+      const upcoming = refVaccines.filter(v => v.st === "due_today" || v.st === "upcoming").length;
       const alerts = [];
-      if (summary.overdue) alerts.push('<span class="badge expired">'+summary.overdue+' 项已过期</span>');
-      if (summary.upcoming) alerts.push('<span class="badge upcoming">'+summary.upcoming+' 项30天内到期</span>');
+      if (overdue) alerts.push('<span class="badge expired">'+overdue+' 项已过期</span>');
+      if (upcoming) alerts.push('<span class="badge upcoming">'+upcoming+' 项30天内到期</span>');
       const latest = summary.latestVaccine;
       detail.innerHTML =
         '<h2>'+esc(p.ringNo)+' 疫苗详情</h2>' +
-        '<div class="meta">'+esc(p.owner)+' · '+esc(p.color)+' · '+esc(p.loft)+'</div>' +
+        '<div class="meta">'+esc(p.owner)+' · '+esc(p.color)+' · '+esc(p.loft)+'（状态判定日：'+baseDateStr+'）</div>' +
         '<div class="detail-grid section"><div class="small"><b>最近接种</b><br>'+(latest ? esc(latest.name)+'　'+esc(latest.date) : "暂无记录")+'</div>' +
         '<div class="small"><b>到期提醒</b><br>'+(alerts.length ? alerts.join(" ") : esc(summary.reminder))+'</div></div>' +
         '<table class="section" style="width:100%"><thead><tr><th>疫苗</th><th>接种日期</th><th>下次到期日</th><th>状态</th><th>提醒</th></tr></thead><tbody>' +
-        data.vaccines.map(v => {
-          const st = statusOf(v);
-          return '<tr style="cursor:default"><td>'+esc(v.name)+'</td><td>'+esc(v.date)+'</td><td>'+(v.dueDate?esc(v.dueDate):'<span class="meta">未记录</span>')+'</td><td><span class="badge '+st+'">'+STATUS_TEXT[st]+'</span></td><td class="reminder '+st+'">'+esc(reminderText(v, st))+'</td></tr>';
+        refVaccines.map(v => {
+          return '<tr style="cursor:default"><td>'+esc(v.name)+'</td><td>'+esc(v.date)+'</td><td>'+(v.dueDate?esc(v.dueDate):'<span class="meta">未记录</span>')+'</td><td><span class="badge '+v.st+'">'+STATUS_TEXT[v.st]+'</span></td><td class="reminder '+v.st+'">'+esc(reminderText(v, v.st, base))+'</td></tr>';
         }).join("") +
         '</tbody></table>';
     }
-    function reminderText(v, st){
+    function reminderText(v, st, base){
+      const ref = base === undefined ? todayUTC() : base;
       if (st === "unknown") return "未记录到期日";
-      const days = Math.round((Date.parse(v.dueDate+"T00:00:00Z") - todayUTC())/DAY);
+      const days = Math.round((Date.parse(v.dueDate+"T00:00:00Z") - ref)/DAY);
       if (st === "expired") return "已过期 "+(-days)+" 天（"+v.dueDate+" 到期）";
       if (st === "due_today") return "今日到期（"+v.dueDate+"），请尽快接种";
       if (st === "upcoming") return days+" 天后到期（"+v.dueDate+"）";
